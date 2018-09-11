@@ -3,7 +3,7 @@ import numpy as np
 
 td,tl,vd,vl,tsd,tsl = hw.load_mnist_data_file("./../data/")
 init=0
-no=1
+no=5
 weight_init=hw.random_normal_weight_init
 bias_init=hw.zeros_bias_init
 
@@ -15,7 +15,8 @@ z = mlp.forward(td[init:init+no])
 labels = np.array([np.zeros(10) for l in tl])
 for i in range(tl.shape[0]):
 	labels[i][tl[i]]=1
-
+mlp.backward(labels[init:init+no])
+print(mlp.dW[0].shape)
 #print("Actual:{} Prediction:{} Loss:{}".format(tl[init:init+no],z.argmax(1),loss))
 #print("Predict_Accuracy:{} Loss_zero:{}".format(tl[init:init+no]==z.argmax(1),loss==0))
 #print("Loss_accuracy:{}".format((tl[init:init+no]==z.argmax(1))==(loss==0)))
