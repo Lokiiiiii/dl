@@ -190,10 +190,18 @@ class BatchNorm(object):
 		return self.forward(x, eval)
 
 	def forward(self, x, eval=False):
-		raise NotImplemented
+		self.mean = np.average(x,0)
+		shiftedX = x-self.mean
+		self.var = np.average(np.square(shiftedX),0)
+		self.normalizedX = shiftedX/np.sqrt(self.var+self.eps)
+		out = self.gamma.dot(self.normalizedX) + self.beta
+		return out
 
 	def backward(self, delta):
-		raise NotImplemented
+		dnormalizedX = delta*self.gamma
+		self.dbeta = np.sum(delta,0)
+		self.dgamma = np.sum(delta.dot(self.normalizedX),0)
+		return dnormalizedX
 
 
 def random_normal_weight_init(d0, d1):
@@ -227,8 +235,7 @@ class MLP(object):
 		self.lsizes = [input_size] + hiddens + [output_size]
 		self.W = [weight_init_fn(m,n) for m,n in zip(self.lsizes[:-1],self.lsizes[1:])]
 		self.b = [bias_init_fn(m) for m in self.lsizes[1:]]
-#		self.dW = [np.zeros_like(matrix) for matrix in self.W]
-#		self.db = [np.zeros_like(matrix) for matrix in self.b]
+
 		# if batch norm, add batch norm parameters
 		if self.bn:
 			self.bn_layers = None
@@ -238,13 +245,11 @@ class MLP(object):
 	def forward(self, x):
 		self.state = [(x,)] + [[]]*len(self.W)
 		for i in range(len(self.W)):
-			self.state[i+1] = ( self.activations[i]( self.state[i][0].dot(self.W[i]) + self.b[i]) )
-#			self.state[i+1] = ( self.activations[i]( np.hstack((self.state[i][0],np.ones((self.state[i][0].shape[0],1)))).dot( np.vstack((self.W[i],self.b[i])) ) ) )
+			self.state[i+1] = ( self.activations[i].forward(self.state[i][0].dot(self.W[i]) + self.b[i]), self.activations[i].derivative() )
 		return self.state[-1][0]
 
 	def zero_grads(self):
 		self.gradients = [[] for l in self.lsizes]
-#		self.gradients = [np.zeros((l,1)) for l in self.lsizes]
 
 	def step(self)  :
 		self.W = [self.W[i] - self.lr*self.dW[i] for i in range(len(self.W))]
@@ -257,10 +262,12 @@ class MLP(object):
 		self.gradients[-1] = dloss.T
 		g=len(self.gradients)-2
 		while g>=0:
-			self.gradients[g] = self.W[g].dot(np.multiply(self.state[g+1][-1].T, self.gradients[g+1]))		
-			g-=1
+			self.gradients[g] = self.W[g].dot(self.gradients[g+1] * self.state[g+1][-1].T)
+			g-=1	
 		self.db = [self.gradients[i+1].T*self.state[i+1][1] for i in range(len(self.b))]
 		self.dW = [self.state[i][0].T.dot(self.db[i]) for i in range(len(self.b))]
+		self.db = [np.average(d,0) for d in self.db]
+		self.dW = [d/self.state[-1][-1].shape[0] for d in self.dW]
 
 
 	def __call__(self, x):
