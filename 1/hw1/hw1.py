@@ -25,14 +25,6 @@ import os
 """https://hips.seas.harvard.edu/blog/2013/01/09/computing-log-sum-exp/
 """
 
-def LogSumExp(vector):	
-	mx = np.amax(vector)
-	shifted = vector - mx
-	exp = np.exp(shifted)
-	sumexp = np.sum(exp)
-	result = mx + np.log(sumexp)
-	return exp, sumexp, result
-
 def load_mnist_data_file(path):
 	train_data = np.load(path+"train_data.npy")
 	val_data = np.load(path+"val_data.npy")
@@ -54,7 +46,7 @@ class Activation(object):
 		self.state = None
 
 	def __call__(self, x):
-		return self.forward(x), self.derivative()
+		return self.forward(x)
 
 	def forward(self, x):
 		raise NotImplemented
@@ -71,12 +63,15 @@ class Identity(Activation):
 		super(Identity, self).__init__()
 
 	def forward(self, x):
-		self.state = np.ones((x.shape))
-		return x
+		self.state = x
+		return self.state
 
 	def derivative(self):
-		return self.state
-#		return 1.0
+		return 1.0
+
+	def d2(self):
+		return np.ones(self.state.shape)
+
 
 
 class Sigmoid(Activation):
@@ -142,6 +137,13 @@ class Criterion(object):
 	def derivative(self):
 		raise NotImplemented
 
+def LogSumExp(x):
+	mx = np.amax(x,1).reshape(x.shape[0],1)
+	shifted = x - mx
+	exp = np.exp(shifted)
+	sumexp = np.sum(exp,1).reshape(x.shape[0],1)
+	result = mx + np.log(sumexp)
+	return exp, sumexp, result
 
 class SoftmaxCrossEntropy(Criterion):
 	def __init__(self):
@@ -149,20 +151,14 @@ class SoftmaxCrossEntropy(Criterion):
 		self.sm = None
 
 	def forward(self, x, y):
-		batch_result = []
 		self.state = []
-		for b in range(x.shape[0]):
-			exp, sumexp, logsumexp = LogSumExp(x[b])
-			negsumproduct = -np.sum(x[b]*y[b])
-			t2 = np.sum(y[b]*logsumexp)
-			result_per_example = t2 + negsumproduct
-			batch_result.append(result_per_example)
-			self.state.append(-y[b] + (exp/sumexp))
-		return(np.array(batch_result))
+		exp, sumexp, logsumexp = LogSumExp(x)
+		self.state = exp/sumexp-y
+		out = -np.sum(y*(x-logsumexp),1)
+		return np.array(out)
 
 	def derivative(self):
-		return(np.array(self.state))
-
+		return np.array(self.state)
 
 class BatchNorm(object):
 	def __init__(self, fan_in, alpha=0.9):
@@ -171,6 +167,7 @@ class BatchNorm(object):
 		self.x = None
 		self.norm = None
 		self.out = None
+		self.count = 0
 
 		# The following attributes will be tested
 		self.var = np.ones((1, fan_in))
@@ -190,18 +187,29 @@ class BatchNorm(object):
 		return self.forward(x, eval)
 
 	def forward(self, x, eval=False):
+		self.x = x
 		self.mean = np.average(x,0)
-		shiftedX = x-self.mean
-		self.var = np.average(np.square(shiftedX),0)
-		self.normalizedX = shiftedX/np.sqrt(self.var+self.eps)
-		out = self.gamma.dot(self.normalizedX) + self.beta
-		return out
+		self.running_mean = (self.running_mean*self.count + self.mean)/(self.count+1)
+		self.shiftedX = x-self.mean
+		self.var = np.average(np.square(self.shiftedX),0)
+		self.running_var = (self.running_var*self.count + self.var)/(self.count+1)
+		self.stable_var = self.var+self.eps
+		self.sqrt_stable_var = 1/np.sqrt(self.stable_var)
+		self.normalizedX = self.shiftedX*self.sqrt_stable_var
+		out = self.normalizedX*self.gamma + self.beta
+		self.count+=1
+		return np.array(out)
 
-	def backward(self, delta):
+	def backward(self, delta): #need gradient.T
+		self.delta=delta
+		batch_size = delta.shape[0]
 		dnormalizedX = delta*self.gamma
 		self.dbeta = np.sum(delta,0)
-		self.dgamma = np.sum(delta.dot(self.normalizedX),0)
-		return dnormalizedX
+		self.dgamma = np.sum(delta*self.normalizedX,0)
+		dvar = np.sum(dnormalizedX*self.shiftedX*-0.5*(self.stable_var**-1.5),0)  #float/pow/** ?
+		dmean = np.sum(dnormalizedX*-self.sqrt_stable_var,0) + dvar*np.sum(-2*self.shiftedX,0)/batch_size
+		dX = dnormalizedX*self.sqrt_stable_var + dvar*2*self.shiftedX/batch_size + dmean/batch_size
+		return np.array(dX)                      #return .T?
 
 
 def random_normal_weight_init(d0, d1):
@@ -225,6 +233,9 @@ class MLP(object):
 		self.input_size = input_size
 		self.output_size = output_size
 		self.activations = activations
+		for a in self.activations:
+			if type(a)==Identity:
+				a.derivative=a.d2
 		self.criterion = criterion
 		self.lr = lr
 		self.momentum = momentum
@@ -235,16 +246,19 @@ class MLP(object):
 		self.lsizes = [input_size] + hiddens + [output_size]
 		self.W = [weight_init_fn(m,n) for m,n in zip(self.lsizes[:-1],self.lsizes[1:])]
 		self.b = [bias_init_fn(m) for m in self.lsizes[1:]]
+		self.db = [np.zeros_like(b) for b in self.b]
 
 		# if batch norm, add batch norm parameters
-		if self.bn:
-			self.bn_layers = None
+#		if self.bn:
+		self.bn_layers = [BatchNorm(self.lsizes[i]) for i in range(self.num_bn_layers)]
 		# Feel free to add any other attributes useful to your implementation (input, output, ...)
 		self.loss = SoftmaxCrossEntropy()
 
 	def forward(self, x):
-		self.state = [(x,)] + [[]]*len(self.W)
-		for i in range(len(self.W)):
+		self.state = [[x,]] + [[]]*len(self.W)
+		for i in range(len(self.W)):	
+			if i<self.num_bn_layers:
+				self.state[i][0] = self.bn_layers[i].forward(self.state[i][0])
 			self.state[i+1] = ( self.activations[i].forward(self.state[i][0].dot(self.W[i]) + self.b[i]), self.activations[i].derivative() )
 		return self.state[-1][0]
 
@@ -254,17 +268,24 @@ class MLP(object):
 	def step(self)  :
 		self.W = [self.W[i] - self.lr*self.dW[i] for i in range(len(self.W))]
 		self.b = [self.b[i] - self.lr*self.db[i] for i in range(len(self.b))]
+		for bn in self.bn_layers:
+			bn.gamma -= bn.dgamma*bn.alpha
+			bn.beta -= bn.dbeta*bn.alpha
 
 	def backward(self, labels):
 		loss_value = self.loss.forward(self.state[-1][0], labels)
 		dloss = self.loss.derivative()
 		self.zero_grads()
 		self.gradients[-1] = dloss.T
+		self.db[-1]=self.gradients[-1].T*self.state[-1][1]
 		g=len(self.gradients)-2
 		while g>=0:
-			self.gradients[g] = self.W[g].dot(self.gradients[g+1] * self.state[g+1][-1].T)
+			self.gradients[g] = self.W[g].dot(self.db[g].T)
+			if g<self.num_bn_layers:
+				self.gradients[g] = self.bn_layers[g].backward(self.gradients[g].T).T
+			if (g-1)>=0:
+				self.db[g-1]=self.gradients[g].T*self.state[g][1]
 			g-=1	
-		self.db = [self.gradients[i+1].T*self.state[i+1][1] for i in range(len(self.b))]
 		self.dW = [self.state[i][0].T.dot(self.db[i]) for i in range(len(self.b))]
 		self.db = [np.average(d,0) for d in self.db]
 		self.dW = [d/self.state[-1][-1].shape[0] for d in self.dW]
